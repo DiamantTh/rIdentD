@@ -1,9 +1,9 @@
-# Rust Rewrite Instructions (oidentd)
+# Rust Rewrite Instructions (rIdentD)
 
 ## Goal
-Build a Rust implementation of oidentd (RFC 1413 Ident daemon) with IPv4/IPv6,
-NAT support, forwarding, and per-user capability rules. Behavior should be
-compatible with oidentd 3.x.
+Build rIdentD, a Rust implementation of oidentd (RFC 1413 Ident daemon) with
+IPv4/IPv6, NAT support, forwarding, and per-user capability rules. Behavior
+should be compatible with oidentd 3.x.
 
 ## Compatibility Targets
 - Wire protocol: accept a single line `lport , fport` and reply with

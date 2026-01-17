@@ -1,4 +1,4 @@
-# Next steps
+# rIdentD next steps
 
 - Implement UID lookup trait and Linux/BSD backends (netlink tcpdiag + /proc fallback).
 - Wire UID lookup and capability evaluation into request handling.
