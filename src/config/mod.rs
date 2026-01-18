@@ -1,4 +1,5 @@
 pub mod legacy;
+pub mod paths;
 pub mod toml;
 
 #[derive(Debug, Clone)]

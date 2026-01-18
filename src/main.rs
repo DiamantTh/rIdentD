@@ -1,18 +1,11 @@
-mod caps;
-mod config;
-mod ident;
-mod kernel;
-mod nat;
-mod net;
-mod util;
-
 use std::collections::VecDeque;
 use std::env;
 use std::io::{self, BufRead};
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+use ridentd::{config, kernel, net, util};
 
 const DEFAULT_PORT: u16 = 113;
 
@@ -43,24 +36,31 @@ fn run() -> io::Result<()> {
         return Ok(());
     }
 
+    if opts.masquerade_path.is_some() || opts.proxy.is_some() || opts.masquerade_first {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "NAT options are handled by ridentd-natd",
+        ));
+    }
+
     if opts.inetd {
         return run_inetd();
     }
 
-    let addrs = build_socket_addrs(&opts.addrs, opts.port)
+    let addrs = util::build_socket_addrs(&opts.addrs, opts.port)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     let os = opts
         .os
         .clone()
-        .unwrap_or_else(|| crate::config::Config::default().os);
+        .unwrap_or_else(|| config::Config::default().os);
     let lookup = build_lookup();
+    let handler = Arc::new(net::IdentHandler::new(os, lookup));
     let server_config = net::server::ServerConfig {
         addrs,
         timeout: opts.timeout,
         connection_limit: opts.connection_limit,
         max_line_len: opts.max_line_len,
-        os,
-        lookup,
+        handler,
     };
 
     net::server::serve(server_config)
@@ -404,36 +404,6 @@ fn parse_timeout(value: &str) -> Result<Option<Duration>, String> {
     } else {
         Ok(Some(Duration::from_secs(seconds)))
     }
-}
-
-fn build_socket_addrs(addrs: &[String], port: u16) -> Result<Vec<SocketAddr>, String> {
-    if addrs.is_empty() {
-        return Ok(vec![
-            SocketAddr::from(([0, 0, 0, 0], port)),
-            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], port)),
-        ]);
-    }
-
-    let mut resolved = Vec::new();
-    for addr in addrs {
-        if let Ok(socket) = addr.parse::<SocketAddr>() {
-            resolved.push(socket);
-            continue;
-        }
-
-        let candidate = if addr.contains(':') {
-            format!("[{addr}]:{port}")
-        } else {
-            format!("{addr}:{port}")
-        };
-
-        let socket = candidate
-            .parse::<SocketAddr>()
-            .map_err(|_| format!("invalid address: {addr}"))?;
-        resolved.push(socket);
-    }
-
-    Ok(resolved)
 }
 
 fn build_lookup() -> Arc<dyn kernel::UidLookup + Send + Sync> {

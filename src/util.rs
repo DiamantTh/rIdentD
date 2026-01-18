@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now_millis() -> u128 {
@@ -5,6 +6,36 @@ pub fn now_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+pub fn build_socket_addrs(addrs: &[String], port: u16) -> Result<Vec<SocketAddr>, String> {
+    if addrs.is_empty() {
+        return Ok(vec![
+            SocketAddr::from(([0, 0, 0, 0], port)),
+            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], port)),
+        ]);
+    }
+
+    let mut resolved = Vec::new();
+    for addr in addrs {
+        if let Ok(socket) = addr.parse::<SocketAddr>() {
+            resolved.push(socket);
+            continue;
+        }
+
+        let candidate = if addr.contains(':') {
+            format!("[{addr}]:{port}")
+        } else {
+            format!("{addr}:{port}")
+        };
+
+        let socket = candidate
+            .parse::<SocketAddr>()
+            .map_err(|_| format!("invalid address: {addr}"))?;
+        resolved.push(socket);
+    }
+
+    Ok(resolved)
 }
 
 #[cfg(unix)]

@@ -1,4 +1,10 @@
-use std::net::IpAddr;
+use std::fmt;
+use std::fs;
+use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
+
+use crate::ident::{ErrorCode, Response};
+use crate::net::{parse_request_line, RequestHandler};
 
 #[derive(Debug, Clone, Default)]
 pub struct MasqueradeMap {
@@ -10,6 +16,12 @@ impl MasqueradeMap {
         Self {
             entries: Vec::new(),
         }
+    }
+
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        let input = fs::read_to_string(path)?;
+        Self::parse(&input)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
     }
 
     pub fn parse(input: &str) -> Result<Self, MasqueradeError> {
@@ -94,6 +106,54 @@ impl MasqueradeError {
         Self {
             line,
             message: message.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for MasqueradeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[line {}] {}", self.line, self.message)
+    }
+}
+
+impl std::error::Error for MasqueradeError {}
+
+#[derive(Debug, Clone)]
+pub struct MasqueradeHandler {
+    map: MasqueradeMap,
+}
+
+impl MasqueradeHandler {
+    pub fn new(map: MasqueradeMap) -> Self {
+        Self { map }
+    }
+}
+
+impl RequestHandler for MasqueradeHandler {
+    fn handle(&self, line: &str, _local: SocketAddr, remote: SocketAddr) -> String {
+        match parse_request_line(line) {
+            Ok(request) => {
+                let response = match self.map.lookup(remote.ip()) {
+                    Some(entry) => Response::UserId {
+                        os: entry.os.clone(),
+                        reply: entry.user.clone(),
+                    },
+                    None => Response::Error {
+                        code: ErrorCode::NoUser,
+                    },
+                };
+                crate::ident::format_response(request.lport, request.fport, response)
+            }
+            Err(err) => {
+                let (lport, fport) = err.ports_for_response();
+                crate::ident::format_response(
+                    lport,
+                    fport,
+                    Response::Error {
+                        code: ErrorCode::InvalidPort,
+                    },
+                )
+            }
         }
     }
 }

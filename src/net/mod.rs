@@ -1,12 +1,50 @@
 pub mod server;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
 use crate::ident::{ErrorCode, Response};
 use crate::kernel::{UidLookup, UnsupportedLookup};
 use crate::util::username_from_uid;
 
 const DEFAULT_OS: &str = "UNIX";
+
+pub trait RequestHandler {
+    fn handle(&self, line: &str, local: SocketAddr, remote: SocketAddr) -> String;
+}
+
+#[derive(Clone)]
+pub struct IdentHandler {
+    os: String,
+    lookup: Arc<dyn UidLookup + Send + Sync>,
+}
+
+impl IdentHandler {
+    pub fn new(os: String, lookup: Arc<dyn UidLookup + Send + Sync>) -> Self {
+        Self { os, lookup }
+    }
+}
+
+impl Default for IdentHandler {
+    fn default() -> Self {
+        Self {
+            os: DEFAULT_OS.to_string(),
+            lookup: Arc::new(UnsupportedLookup),
+        }
+    }
+}
+
+impl RequestHandler for IdentHandler {
+    fn handle(&self, line: &str, local: SocketAddr, remote: SocketAddr) -> String {
+        handle_request_line_with(
+            line,
+            local.ip(),
+            remote.ip(),
+            self.lookup.as_ref(),
+            &self.os,
+        )
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Request {
