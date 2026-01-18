@@ -1,10 +1,26 @@
 use std::fmt;
-use std::fs;
-use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::ident::{ErrorCode, Response};
 use crate::net::{parse_request_line, RequestHandler};
+
+pub const DEFAULT_FORWARD_PORT: u16 = 113;
+const DEFAULT_FORWARD_TIMEOUT_SECS: u64 = 5;
+const DEFAULT_CONNTRACK_PATHS: [&str; 2] = ["/proc/net/nf_conntrack", "/proc/net/ip_conntrack"];
+
+pub fn default_conntrack_path() -> Option<PathBuf> {
+    for path in DEFAULT_CONNTRACK_PATHS {
+        let candidate = Path::new(path);
+        if candidate.exists() {
+            return Some(candidate.to_path_buf());
+        }
+    }
+    None
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct MasqueradeMap {
@@ -119,25 +135,97 @@ impl fmt::Display for MasqueradeError {
 impl std::error::Error for MasqueradeError {}
 
 #[derive(Debug, Clone)]
-pub struct MasqueradeHandler {
-    map: MasqueradeMap,
+pub struct NatOptions {
+    pub forward_port: Option<u16>,
+    pub masquerade_first: bool,
+    pub proxy: Option<IpAddr>,
+    pub conntrack_path: PathBuf,
+    pub os: String,
 }
 
-impl MasqueradeHandler {
-    pub fn new(map: MasqueradeMap) -> Self {
-        Self { map }
+impl NatOptions {
+    pub fn new(conntrack_path: PathBuf) -> Self {
+        Self {
+            forward_port: None,
+            masquerade_first: false,
+            proxy: None,
+            conntrack_path,
+            os: "UNIX".to_string(),
+        }
     }
 }
 
-impl RequestHandler for MasqueradeHandler {
+#[derive(Debug, Clone)]
+pub struct NatHandler {
+    map: MasqueradeMap,
+    options: NatOptions,
+}
+
+impl NatHandler {
+    pub fn new(map: MasqueradeMap, options: NatOptions) -> Self {
+        Self { map, options }
+    }
+}
+
+impl RequestHandler for NatHandler {
     fn handle(&self, line: &str, _local: SocketAddr, remote: SocketAddr) -> String {
         match parse_request_line(line) {
             Ok(request) => {
-                let response = match self.map.lookup(remote.ip()) {
-                    Some(entry) => Response::UserId {
-                        os: entry.os.clone(),
-                        reply: entry.user.clone(),
-                    },
+                let mapping = find_conntrack_mapping(
+                    &self.options.conntrack_path,
+                    request.lport,
+                    request.fport,
+                    remote.ip(),
+                    self.options.proxy,
+                );
+                let response = match mapping {
+                    Some(mapping) => {
+                        let static_entry = self.map.lookup(mapping.internal_ip);
+                        let forwarded = if self.options.forward_port.is_some() {
+                            if self.options.masquerade_first {
+                                None
+                            } else {
+                                forward_request(
+                                    &mapping,
+                                    self.options.forward_port.unwrap(),
+                                    &self.options.os,
+                                )
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Some(response) = forwarded {
+                            response
+                        } else if self.options.forward_port.is_some() && self.options.masquerade_first
+                        {
+                            if let Some(entry) = static_entry {
+                                Response::UserId {
+                                    os: entry.os.clone(),
+                                    reply: entry.user.clone(),
+                                }
+                            } else if let Some(response) = forward_request(
+                                &mapping,
+                                self.options.forward_port.unwrap(),
+                                &self.options.os,
+                            ) {
+                                response
+                            } else {
+                                Response::Error {
+                                    code: ErrorCode::NoUser,
+                                }
+                            }
+                        } else if let Some(entry) = static_entry {
+                            Response::UserId {
+                                os: entry.os.clone(),
+                                reply: entry.user.clone(),
+                            }
+                        } else {
+                            Response::Error {
+                                code: ErrorCode::NoUser,
+                            }
+                        }
+                    }
                     None => Response::Error {
                         code: ErrorCode::NoUser,
                     },
@@ -156,6 +244,170 @@ impl RequestHandler for MasqueradeHandler {
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ConntrackMapping {
+    internal_ip: IpAddr,
+    internal_lport: u16,
+    internal_fport: u16,
+}
+
+#[derive(Debug, Clone)]
+struct ConntrackEntry {
+    orig: ConntrackTuple,
+    reply: ConntrackTuple,
+}
+
+#[derive(Debug, Clone)]
+struct ConntrackTuple {
+    src: IpAddr,
+    dst: IpAddr,
+    sport: u16,
+    dport: u16,
+}
+
+#[derive(Clone, Default)]
+struct TupleParts {
+    src: Option<IpAddr>,
+    dst: Option<IpAddr>,
+    sport: Option<u16>,
+    dport: Option<u16>,
+}
+
+impl TupleParts {
+    fn complete(&self) -> bool {
+        self.src.is_some() && self.dst.is_some() && self.sport.is_some() && self.dport.is_some()
+    }
+
+    fn into_tuple(self) -> Option<ConntrackTuple> {
+        Some(ConntrackTuple {
+            src: self.src?,
+            dst: self.dst?,
+            sport: self.sport?,
+            dport: self.dport?,
+        })
+    }
+}
+
+fn find_conntrack_mapping(
+    path: &Path,
+    lport: u16,
+    fport: u16,
+    remote_ip: IpAddr,
+    proxy: Option<IpAddr>,
+) -> Option<ConntrackMapping> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.ok()?;
+        if let Some(entry) = parse_conntrack_line(&line) {
+            if let Some(mapping) = match_entry(entry, lport, fport, remote_ip, proxy) {
+                return Some(mapping);
+            }
+        }
+    }
+    None
+}
+
+fn parse_conntrack_line(line: &str) -> Option<ConntrackEntry> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 6 {
+        return None;
+    }
+    if tokens.get(2)? != &"tcp" {
+        return None;
+    }
+    if !tokens.iter().any(|token| *token == "ESTABLISHED") {
+        return None;
+    }
+
+    let mut tuples = [TupleParts::default(), TupleParts::default()];
+    let mut idx = 0usize;
+    for token in tokens {
+        if let Some(value) = token.strip_prefix("src=") {
+            tuples[idx].src = value.parse().ok();
+        } else if let Some(value) = token.strip_prefix("dst=") {
+            tuples[idx].dst = value.parse().ok();
+        } else if let Some(value) = token.strip_prefix("sport=") {
+            tuples[idx].sport = value.parse().ok();
+        } else if let Some(value) = token.strip_prefix("dport=") {
+            tuples[idx].dport = value.parse().ok();
+        }
+
+        if tuples[idx].complete() {
+            if idx == 0 {
+                idx = 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let orig = tuples[0].clone().into_tuple()?;
+    let reply = tuples[1].clone().into_tuple()?;
+    Some(ConntrackEntry { orig, reply })
+}
+
+fn match_entry(
+    entry: ConntrackEntry,
+    lport: u16,
+    fport: u16,
+    remote_ip: IpAddr,
+    proxy: Option<IpAddr>,
+) -> Option<ConntrackMapping> {
+    if entry.reply.dport != lport || entry.reply.sport != fport {
+        return None;
+    }
+
+    if entry.reply.src != remote_ip {
+        if let Some(proxy_ip) = proxy {
+            if remote_ip != proxy_ip || entry.reply.src == proxy_ip {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+
+    Some(ConntrackMapping {
+        internal_ip: entry.orig.src,
+        internal_lport: entry.orig.sport,
+        internal_fport: entry.orig.dport,
+    })
+}
+
+fn forward_request(
+    mapping: &ConntrackMapping,
+    port: u16,
+    os: &str,
+) -> Option<Response> {
+    let addr = SocketAddr::new(mapping.internal_ip, port);
+    let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(DEFAULT_FORWARD_TIMEOUT_SECS))
+        .ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(DEFAULT_FORWARD_TIMEOUT_SECS)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(DEFAULT_FORWARD_TIMEOUT_SECS)));
+    let mut stream = stream;
+    let query = format!("{},{}\r\n", mapping.internal_lport, mapping.internal_fport);
+    stream.write_all(query.as_bytes()).ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut buf = String::new();
+    reader.read_line(&mut buf).ok()?;
+    let reply = parse_forward_reply(&buf)?;
+    Some(Response::UserId {
+        os: os.to_string(),
+        reply,
+    })
+}
+
+fn parse_forward_reply(line: &str) -> Option<String> {
+    let trimmed = line.trim_end_matches(['\r', '\n']);
+    let (_, rest) = trimmed.split_once(":USERID:")?;
+    let (_, reply) = rest.split_once(':')?;
+    if reply.is_empty() {
+        return None;
+    }
+    Some(reply.to_string())
 }
 
 fn parse_host(token: &str, line: usize) -> Result<IpNet, MasqueradeError> {
@@ -258,5 +510,36 @@ mod tests {
     fn invalid_mask_rejected() {
         let err = MasqueradeMap::parse("192.0.2.1/33 user UNIX").unwrap_err();
         assert!(err.message.contains("mask"));
+    }
+
+    #[test]
+    fn parse_conntrack_ipv4_line() {
+        let line = "ipv4 2 tcp 6 431999 ESTABLISHED src=10.0.0.2 dst=93.184.216.34 sport=12345 dport=80 packets=1 bytes=2 src=93.184.216.34 dst=203.0.113.1 sport=80 dport=54321 [ASSURED] mark=0 use=1";
+        let entry = parse_conntrack_line(line).unwrap();
+        assert_eq!(entry.orig.src, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(entry.orig.dst, "93.184.216.34".parse::<IpAddr>().unwrap());
+        assert_eq!(entry.orig.sport, 12345);
+        assert_eq!(entry.orig.dport, 80);
+        assert_eq!(entry.reply.src, "93.184.216.34".parse::<IpAddr>().unwrap());
+        assert_eq!(entry.reply.dst, "203.0.113.1".parse::<IpAddr>().unwrap());
+        assert_eq!(entry.reply.sport, 80);
+        assert_eq!(entry.reply.dport, 54321);
+    }
+
+    #[test]
+    fn match_conntrack_allows_proxy_origin() {
+        let line = "ipv4 2 tcp 6 431999 ESTABLISHED src=10.0.0.2 dst=93.184.216.34 sport=12345 dport=80 src=93.184.216.34 dst=203.0.113.1 sport=80 dport=54321";
+        let entry = parse_conntrack_line(line).unwrap();
+        let mapping = match_entry(
+            entry,
+            54321,
+            80,
+            "192.0.2.9".parse::<IpAddr>().unwrap(),
+            Some("192.0.2.9".parse::<IpAddr>().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(mapping.internal_ip, "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(mapping.internal_lport, 12345);
+        assert_eq!(mapping.internal_fport, 80);
     }
 }

@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
 use std::env;
 use std::io;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ridentd::config::paths;
-use ridentd::nat::{MasqueradeHandler, MasqueradeMap};
+use ridentd::nat::{default_conntrack_path, MasqueradeMap, NatHandler, NatOptions, DEFAULT_FORWARD_PORT};
 use ridentd::net::server::ServerConfig;
 use ridentd::util;
 
@@ -45,7 +46,22 @@ fn run() -> io::Result<()> {
         .masquerade_path
         .unwrap_or_else(paths::masquerade_config_path);
     let map = MasqueradeMap::load(&masq_path)?;
-    let handler = Arc::new(MasqueradeHandler::new(map));
+    let conntrack_path = default_conntrack_path().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no conntrack file found (expected /proc/net/nf_conntrack)",
+        )
+    })?;
+    let mut options = NatOptions::new(conntrack_path);
+    if opts.masquerade_first && opts.forward_port.is_none() {
+        options.forward_port = Some(DEFAULT_FORWARD_PORT);
+    } else {
+        options.forward_port = opts.forward_port;
+    }
+    options.masquerade_first = opts.masquerade_first;
+    options.proxy = opts.proxy;
+    options.os = opts.os;
+    let handler = Arc::new(NatHandler::new(map, options));
     let server_config = ServerConfig {
         addrs,
         timeout: opts.timeout,
@@ -65,6 +81,10 @@ struct CliOptions {
     connection_limit: usize,
     max_line_len: usize,
     masquerade_path: Option<PathBuf>,
+    forward_port: Option<u16>,
+    masquerade_first: bool,
+    proxy: Option<IpAddr>,
+    os: String,
     help: bool,
     version: bool,
 }
@@ -78,6 +98,10 @@ impl Default for CliOptions {
             connection_limit: 128,
             max_line_len: 1024,
             masquerade_path: None,
+            forward_port: None,
+            masquerade_first: false,
+            proxy: None,
+            os: "UNIX".to_string(),
             help: false,
             version: false,
         }
@@ -118,6 +142,26 @@ fn parse_args() -> Result<CliOptions, String> {
             opts.masquerade_path = Some(PathBuf::from(value));
             continue;
         }
+        if let Some(value) = arg.strip_prefix("--forward=") {
+            opts.forward_port = Some(parse_u16(value, "--forward")?);
+            continue;
+        }
+        if arg == "--forward" {
+            opts.forward_port = Some(extract_optional_port(&mut args, DEFAULT_FORWARD_PORT, "--forward")?);
+            continue;
+        }
+        if arg == "--masquerade-first" {
+            opts.masquerade_first = true;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--proxy=") {
+            opts.proxy = Some(parse_ip(value, "--proxy")?);
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--os=") {
+            opts.os = value.to_string();
+            continue;
+        }
         if let Some(value) = arg.strip_prefix("-a=") {
             opts.addrs.push(value.to_string());
             continue;
@@ -132,6 +176,18 @@ fn parse_args() -> Result<CliOptions, String> {
         }
         if let Some(value) = arg.strip_prefix("-m=") {
             opts.masquerade_path = Some(PathBuf::from(value));
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("-f=") {
+            opts.forward_port = Some(parse_u16(value, "-f")?);
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("-P=") {
+            opts.proxy = Some(parse_ip(value, "-P")?);
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("-o=") {
+            opts.os = value.to_string();
             continue;
         }
 
@@ -160,6 +216,25 @@ fn parse_args() -> Result<CliOptions, String> {
                     .ok_or_else(|| format!("option {arg} requires a value"))?;
                 opts.masquerade_path = Some(PathBuf::from(value));
             }
+            "-f" => {
+                opts.forward_port =
+                    Some(extract_optional_port(&mut args, DEFAULT_FORWARD_PORT, "-f")?);
+            }
+            "-M" => {
+                opts.masquerade_first = true;
+            }
+            "-P" => {
+                let value = args
+                    .pop_front()
+                    .ok_or_else(|| format!("option {arg} requires a value"))?;
+                opts.proxy = Some(parse_ip(&value, &arg)?);
+            }
+            "-o" => {
+                let value = args
+                    .pop_front()
+                    .ok_or_else(|| format!("option {arg} requires a value"))?;
+                opts.os = value;
+            }
             _ => return Err(format!("unknown option: {arg}")),
         }
     }
@@ -170,6 +245,12 @@ fn parse_args() -> Result<CliOptions, String> {
 fn parse_u16(value: &str, flag: &str) -> Result<u16, String> {
     value
         .parse::<u16>()
+        .map_err(|_| format!("invalid value for {flag}: {value}"))
+}
+
+fn parse_ip(value: &str, flag: &str) -> Result<IpAddr, String> {
+    value
+        .parse::<IpAddr>()
         .map_err(|_| format!("invalid value for {flag}: {value}"))
 }
 
@@ -184,9 +265,23 @@ fn parse_timeout(value: &str) -> Result<Option<Duration>, String> {
     }
 }
 
+fn extract_optional_port(
+    args: &mut VecDeque<String>,
+    default: u16,
+    flag: &str,
+) -> Result<u16, String> {
+    if let Some(next) = args.front() {
+        if !next.starts_with('-') {
+            let value = args.pop_front().unwrap();
+            return parse_u16(&value, flag);
+        }
+    }
+    Ok(default)
+}
+
 fn print_usage() {
     println!(
-        "ridentd-natd [-a addr] [-p port] [-m file] [-t seconds] [--help]"
+        "ridentd-natd [-a addr] [-p port] [-m file] [-f [port]] [-M] [-P host] [-o os] [-t seconds] [--help]"
     );
 }
 
