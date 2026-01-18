@@ -1011,4 +1011,39 @@ to 198.51.100.5 lport 5000:6000 {
         let err = parse_user_config(input).unwrap_err();
         assert!(err.message.contains("spoof"));
     }
+
+    #[test]
+    fn parse_allow_deny_force_statements() {
+        let input = r#"
+default {
+    default {
+        allow random
+        deny hide
+        force numeric
+        force reply "alpha" "beta"
+        force forward example.com 113
+        allow forward
+        deny forward
+    }
+}
+"#;
+
+        let config = parse_system_config(input).unwrap();
+        let rule = &config.sections[0].rules[0];
+        assert_eq!(
+            rule.statements,
+            vec![
+                CapStatement::AllowCap(Capability::Random),
+                CapStatement::DenyCap(Capability::Hide),
+                CapStatement::ForceCap(Capability::Numeric),
+                CapStatement::ForceReply(vec!["alpha".to_string(), "beta".to_string()]),
+                CapStatement::ForceForward {
+                    host: AddressSpec::Host("example.com".to_string()),
+                    port: 113,
+                },
+                CapStatement::AllowForward,
+                CapStatement::DenyForward,
+            ]
+        );
+    }
 }
