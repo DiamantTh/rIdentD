@@ -7,14 +7,18 @@ use std::sync::{
 use std::thread;
 use std::time::Duration;
 
-use super::handle_request_line;
+use crate::kernel::{UidLookup, UnsupportedLookup};
 
-#[derive(Debug, Clone)]
+use super::{handle_request_line, handle_request_line_with};
+
+#[derive(Clone)]
 pub struct ServerConfig {
     pub addrs: Vec<SocketAddr>,
     pub timeout: Option<Duration>,
     pub connection_limit: usize,
     pub max_line_len: usize,
+    pub os: String,
+    pub lookup: Arc<dyn UidLookup + Send + Sync>,
 }
 
 impl Default for ServerConfig {
@@ -24,6 +28,8 @@ impl Default for ServerConfig {
             timeout: Some(Duration::from_secs(30)),
             connection_limit: 128,
             max_line_len: 1024,
+            os: "UNIX".to_string(),
+            lookup: Arc::new(UnsupportedLookup),
         }
     }
 }
@@ -108,7 +114,16 @@ fn handle_stream(mut stream: TcpStream, config: &ServerConfig) {
     }
 
     let line = String::from_utf8_lossy(&buf);
-    let response = handle_request_line(&line);
+    let response = match (stream.local_addr(), stream.peer_addr()) {
+        (Ok(local), Ok(remote)) => handle_request_line_with(
+            &line,
+            local.ip(),
+            remote.ip(),
+            config.lookup.as_ref(),
+            &config.os,
+        ),
+        _ => handle_request_line(&line),
+    };
     let _ = stream.write_all(response.as_bytes());
 }
 

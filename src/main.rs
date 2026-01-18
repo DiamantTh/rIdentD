@@ -11,6 +11,7 @@ use std::env;
 use std::io::{self, BufRead};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 const DEFAULT_PORT: u16 = 113;
@@ -48,11 +49,18 @@ fn run() -> io::Result<()> {
 
     let addrs = build_socket_addrs(&opts.addrs, opts.port)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    let os = opts
+        .os
+        .clone()
+        .unwrap_or_else(|| crate::config::Config::default().os);
+    let lookup = build_lookup();
     let server_config = net::server::ServerConfig {
         addrs,
         timeout: opts.timeout,
         connection_limit: opts.connection_limit,
         max_line_len: opts.max_line_len,
+        os,
+        lookup,
     };
 
     net::server::serve(server_config)
@@ -426,6 +434,32 @@ fn build_socket_addrs(addrs: &[String], port: u16) -> Result<Vec<SocketAddr>, St
     }
 
     Ok(resolved)
+}
+
+fn build_lookup() -> Arc<dyn kernel::UidLookup + Send + Sync> {
+    #[cfg(target_os = "linux")]
+    {
+        Arc::new(kernel::linux::LinuxLookup::new())
+    }
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        Arc::new(kernel::bsd::BsdLookup::new())
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    {
+        Arc::new(kernel::UnsupportedLookup)
+    }
 }
 
 fn print_usage() {

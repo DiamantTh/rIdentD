@@ -1,6 +1,12 @@
 pub mod server;
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
 use crate::ident::{ErrorCode, Response};
+use crate::kernel::{UidLookup, UnsupportedLookup};
+use crate::util::username_from_uid;
+
+const DEFAULT_OS: &str = "UNIX";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Request {
@@ -46,14 +52,41 @@ pub fn parse_request_line(line: &str) -> Result<Request, ParseError> {
 }
 
 pub fn handle_request_line(line: &str) -> String {
+    let lookup = UnsupportedLookup;
+    handle_request_line_with(
+        line,
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        &lookup,
+        DEFAULT_OS,
+    )
+}
+
+pub fn handle_request_line_with(
+    line: &str,
+    local_ip: IpAddr,
+    remote_ip: IpAddr,
+    lookup: &dyn UidLookup,
+    os: &str,
+) -> String {
     match parse_request_line(line) {
-        Ok(request) => crate::ident::format_response(
-            request.lport,
-            request.fport,
-            Response::Error {
-                code: ErrorCode::NoUser,
-            },
-        ),
+        Ok(request) => {
+            let local = SocketAddr::new(local_ip, request.lport);
+            let remote = SocketAddr::new(remote_ip, request.fport);
+            let response = match lookup.lookup_uid(local, remote) {
+                Ok(Some(uid)) => {
+                    let reply = username_from_uid(uid).unwrap_or_else(|| uid.to_string());
+                    Response::UserId {
+                        os: os.to_string(),
+                        reply,
+                    }
+                }
+                _ => Response::Error {
+                    code: ErrorCode::NoUser,
+                },
+            };
+            crate::ident::format_response(request.lport, request.fport, response)
+        }
         Err(err) => {
             let (lport, fport) = err.ports_for_response();
             crate::ident::format_response(
@@ -84,6 +117,23 @@ fn parse_port(input: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::LookupError;
+    use crate::kernel::UidLookup;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    struct FixedLookup {
+        uid: Option<u32>,
+    }
+
+    impl UidLookup for FixedLookup {
+        fn lookup_uid(
+            &self,
+            _local: SocketAddr,
+            _remote: SocketAddr,
+        ) -> Result<Option<u32>, LookupError> {
+            Ok(self.uid)
+        }
+    }
 
     #[test]
     fn parses_ports_with_spaces() {
@@ -113,5 +163,32 @@ mod tests {
     fn handle_invalid_format_returns_invalid_port_error() {
         let response = handle_request_line("oops");
         assert_eq!(response, "0,0:ERROR:INVALID-PORT\r\n");
+    }
+
+    #[test]
+    fn handle_request_uses_lookup_when_available() {
+        let lookup = FixedLookup { uid: Some(0) };
+        let response = handle_request_line_with(
+            "1,2",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &lookup,
+            "TESTOS",
+        );
+        assert!(response.starts_with("1,2:USERID:TESTOS:"));
+        assert!(response.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn handle_request_returns_no_user_when_missing() {
+        let lookup = FixedLookup { uid: None };
+        let response = handle_request_line_with(
+            "3,4",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            &lookup,
+            "TESTOS",
+        );
+        assert_eq!(response, "3,4:ERROR:NO-USER\r\n");
     }
 }
