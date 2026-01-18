@@ -47,6 +47,8 @@ fn run() -> io::Result<()> {
         return run_inetd();
     }
 
+    load_system_config(&opts)?;
+
     let addrs = util::build_socket_addrs(&opts.addrs, opts.port)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
     let os = opts
@@ -403,6 +405,37 @@ fn parse_timeout(value: &str) -> Result<Option<Duration>, String> {
         Ok(None)
     } else {
         Ok(Some(Duration::from_secs(seconds)))
+    }
+}
+
+fn load_system_config(opts: &CliOptions) -> io::Result<()> {
+    let path = opts
+        .config_path
+        .clone()
+        .unwrap_or_else(config::paths::system_config_path);
+    let format = match opts.config_format.as_deref() {
+        Some(format) => format,
+        None => {
+            if path.extension().and_then(|ext| ext.to_str()) == Some("toml") {
+                "toml"
+            } else {
+                "legacy"
+            }
+        }
+    };
+
+    let result = match format {
+        "toml" => config::toml::load_toml_config(&path).map(|_| ()),
+        "legacy" => config::legacy::load_legacy_config(&path).map(|_| ()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unknown config format: {format}"),
+        )),
+    };
+
+    match result {
+        Err(err) if err.kind() == io::ErrorKind::NotFound && opts.config_path.is_none() => Ok(()),
+        other => other,
     }
 }
 
