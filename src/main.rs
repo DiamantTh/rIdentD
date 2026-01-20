@@ -47,7 +47,7 @@ fn run() -> io::Result<()> {
         return run_inetd();
     }
 
-    load_system_config(&opts)?;
+    let system_config = load_system_config(&opts)?;
 
     let addrs = util::build_socket_addrs(&opts.addrs, opts.port)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
@@ -56,7 +56,7 @@ fn run() -> io::Result<()> {
         .clone()
         .unwrap_or_else(|| config::Config::default().os);
     let lookup = build_lookup();
-    let handler = Arc::new(net::IdentHandler::new(os, lookup));
+    let handler = Arc::new(net::IdentHandler::new(os, lookup, system_config));
     let server_config = net::server::ServerConfig {
         addrs,
         timeout: opts.timeout,
@@ -408,7 +408,7 @@ fn parse_timeout(value: &str) -> Result<Option<Duration>, String> {
     }
 }
 
-fn load_system_config(opts: &CliOptions) -> io::Result<()> {
+fn load_system_config(opts: &CliOptions) -> io::Result<Option<config::legacy::LegacyConfig>> {
     let path = opts
         .config_path
         .clone()
@@ -425,8 +425,8 @@ fn load_system_config(opts: &CliOptions) -> io::Result<()> {
     };
 
     let result = match format {
-        "toml" => config::toml::load_toml_config(&path).map(|_| ()),
-        "legacy" => config::legacy::load_legacy_config(&path).map(|_| ()),
+        "toml" => config::toml::load_toml_config(&path).map(|_| None),
+        "legacy" => config::legacy::load_legacy_config(&path).map(Some),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unknown config format: {format}"),
@@ -434,7 +434,7 @@ fn load_system_config(opts: &CliOptions) -> io::Result<()> {
     };
 
     match result {
-        Err(err) if err.kind() == io::ErrorKind::NotFound && opts.config_path.is_none() => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound && opts.config_path.is_none() => Ok(None),
         other => other,
     }
 }

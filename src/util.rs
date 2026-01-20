@@ -1,4 +1,6 @@
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::{fs, io};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -118,6 +120,67 @@ pub fn uid_from_username(name: &str) -> Option<u32> {
     }
 }
 
+#[cfg(unix)]
+pub fn home_dir_from_uid(uid: u32) -> Option<PathBuf> {
+    use libc::{c_char, getpwuid_r, passwd, sysconf, uid_t, _SC_GETPW_R_SIZE_MAX};
+    use std::ffi::CStr;
+    use std::mem;
+    use std::ptr;
+
+    unsafe {
+        let mut pwd: passwd = mem::zeroed();
+        let mut result: *mut passwd = ptr::null_mut();
+        let size = sysconf(_SC_GETPW_R_SIZE_MAX);
+        let bufsize = if size <= 0 { 16 * 1024 } else { size as usize };
+        let mut buf = vec![0u8; bufsize];
+        let rc = getpwuid_r(
+            uid as uid_t,
+            &mut pwd,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len(),
+            &mut result,
+        );
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+        let dir = CStr::from_ptr(pwd.pw_dir).to_string_lossy().into_owned();
+        Some(PathBuf::from(dir))
+    }
+}
+
+#[cfg(unix)]
+pub fn read_user_config(uid: u32, home: &Path) -> io::Result<Option<String>> {
+    let xdg = home.join(".config").join("oidentd.conf");
+    if let Some(content) = read_if_owned(uid, &xdg)? {
+        return Ok(Some(content));
+    }
+
+    let legacy = home.join(".oidentd.conf");
+    if let Some(content) = read_if_owned(uid, &legacy)? {
+        return Ok(Some(content));
+    }
+
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn read_if_owned(uid: u32, path: &Path) -> io::Result<Option<String>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    if metadata.uid() != uid {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(path)?;
+    Ok(Some(content))
+}
+
 #[cfg(not(unix))]
 pub fn uid_from_username(_name: &str) -> Option<u32> {
     None
@@ -126,4 +189,14 @@ pub fn uid_from_username(_name: &str) -> Option<u32> {
 #[cfg(not(unix))]
 pub fn username_from_uid(_uid: u32) -> Option<String> {
     None
+}
+
+#[cfg(not(unix))]
+pub fn home_dir_from_uid(_uid: u32) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(not(unix))]
+pub fn read_user_config(_uid: u32, _home: &Path) -> io::Result<Option<String>> {
+    Ok(None)
 }

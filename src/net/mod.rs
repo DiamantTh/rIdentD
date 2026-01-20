@@ -3,9 +3,10 @@ pub mod server;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use crate::ident::{ErrorCode, Response};
+use crate::config::legacy::{parse_user_config, LegacyConfig, UserConfig};
+use crate::ident::{select_response, ErrorCode, Response, SelectionContext};
 use crate::kernel::{UidLookup, UnsupportedLookup};
-use crate::util::username_from_uid;
+use crate::util::{home_dir_from_uid, read_user_config, username_from_uid};
 
 const DEFAULT_OS: &str = "UNIX";
 
@@ -17,11 +18,16 @@ pub trait RequestHandler {
 pub struct IdentHandler {
     os: String,
     lookup: Arc<dyn UidLookup + Send + Sync>,
+    system: Option<LegacyConfig>,
 }
 
 impl IdentHandler {
-    pub fn new(os: String, lookup: Arc<dyn UidLookup + Send + Sync>) -> Self {
-        Self { os, lookup }
+    pub fn new(
+        os: String,
+        lookup: Arc<dyn UidLookup + Send + Sync>,
+        system: Option<LegacyConfig>,
+    ) -> Self {
+        Self { os, lookup, system }
     }
 }
 
@@ -30,19 +36,49 @@ impl Default for IdentHandler {
         Self {
             os: DEFAULT_OS.to_string(),
             lookup: Arc::new(UnsupportedLookup),
+            system: None,
         }
     }
 }
 
 impl RequestHandler for IdentHandler {
     fn handle(&self, line: &str, local: SocketAddr, remote: SocketAddr) -> String {
-        handle_request_line_with(
-            line,
-            local.ip(),
-            remote.ip(),
-            self.lookup.as_ref(),
-            &self.os,
-        )
+        match parse_request_line(line) {
+            Ok(request) => {
+                let response = match self
+                    .lookup
+                    .lookup_uid(SocketAddr::new(local.ip(), request.lport), SocketAddr::new(remote.ip(), request.fport))
+                {
+                    Ok(Some(uid)) => {
+                        let user_name = username_from_uid(uid).unwrap_or_else(|| uid.to_string());
+                        let user_config = load_user_config(uid);
+                        let ctx = SelectionContext {
+                            uid,
+                            user: &user_name,
+                            lport: request.lport,
+                            fport: request.fport,
+                            local_ip: local.ip(),
+                            remote_ip: remote.ip(),
+                        };
+                        select_response(self.system.as_ref(), user_config.as_ref(), &ctx, &self.os)
+                    }
+                    _ => Response::Error {
+                        code: ErrorCode::NoUser,
+                    },
+                };
+                crate::ident::format_response(request.lport, request.fport, response)
+            }
+            Err(err) => {
+                let (lport, fport) = err.ports_for_response();
+                crate::ident::format_response(
+                    lport,
+                    fport,
+                    Response::Error {
+                        code: ErrorCode::InvalidPort,
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -113,11 +149,16 @@ pub fn handle_request_line_with(
             let remote = SocketAddr::new(remote_ip, request.fport);
             let response = match lookup.lookup_uid(local, remote) {
                 Ok(Some(uid)) => {
-                    let reply = username_from_uid(uid).unwrap_or_else(|| uid.to_string());
-                    Response::UserId {
-                        os: os.to_string(),
-                        reply,
-                    }
+                    let user_name = username_from_uid(uid).unwrap_or_else(|| uid.to_string());
+                    let ctx = SelectionContext {
+                        uid,
+                        user: &user_name,
+                        lport: request.lport,
+                        fport: request.fport,
+                        local_ip,
+                        remote_ip,
+                    };
+                    select_response(None, None, &ctx, os)
                 }
                 _ => Response::Error {
                     code: ErrorCode::NoUser,
@@ -136,6 +177,12 @@ pub fn handle_request_line_with(
             )
         }
     }
+}
+
+fn load_user_config(uid: u32) -> Option<UserConfig> {
+    let home = home_dir_from_uid(uid)?;
+    let content = read_user_config(uid, &home).ok().flatten()?;
+    parse_user_config(&content).ok()
 }
 
 fn parse_port(input: &str) -> Option<u16> {
