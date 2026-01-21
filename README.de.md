@@ -66,4 +66,4 @@ System-Config legt Capabilities fest; User darf nur innerhalb der erlaubten Mög
 Ziel: kompatibel zu oidentd 3.x. Offene Punkte in `docs/NEXT_STEPS.md`.
 
 ## Lizenz
-Anlehnung an oidentd (MIT-ähnlich). Siehe Lizenzdatei, sobald vorhanden.
+Duale Lizenz: AGPL-3.0-or-later **oder** GPL-3.0-or-later (freie Wahl). Siehe `LICENSE` und `LICENSES/`.

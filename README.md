@@ -67,4 +67,4 @@ System config grants/revokes capabilities; user config can only choose within al
 Target: behavior compatible with oidentd 3.x. Known gaps/notes are tracked in `docs/NEXT_STEPS.md`.
 
 ## License
-Same spirit as upstream oidentd (MIT-like). See repository license once added.
+Dual-licensed: AGPL-3.0-or-later **or** GPL-3.0-or-later (your choice). See `LICENSE` and `LICENSES/`.
