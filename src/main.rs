@@ -63,6 +63,7 @@ fn run() -> io::Result<()> {
         connection_limit: opts.connection_limit,
         max_line_len: opts.max_line_len,
         handler,
+        worker_threads: num_cpus::get().max(1),
     };
 
     net::server::serve(server_config)

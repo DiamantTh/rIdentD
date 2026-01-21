@@ -1,7 +1,14 @@
+-include config.mk
+
 PREFIX ?= /usr/local
-CONFDIR ?= $(PREFIX)/etc/rIdentD
-BINDIR ?= $(PREFIX)/bin
+EXEC_PREFIX ?= $(PREFIX)
+BINDIR ?= $(EXEC_PREFIX)/bin
+SBINDIR ?= $(EXEC_PREFIX)/sbin
+SYSCONFDIR ?= $(PREFIX)/etc
+CONFDIR ?= $(SYSCONFDIR)/rIdentD
 CARGO ?= cargo
+CARGOFLAGS ?=
+RUSTFLAGS ?=
 BUILD_ENV ?= RIDENTD_CONFIG_DIR=$(CONFDIR)
 
 .PHONY: all build release test clean install uninstall
@@ -9,22 +16,22 @@ BUILD_ENV ?= RIDENTD_CONFIG_DIR=$(CONFDIR)
 all: build
 
 build:
-	$(BUILD_ENV) $(CARGO) build
+	RUSTFLAGS="$(RUSTFLAGS)" $(BUILD_ENV) $(CARGO) build $(CARGOFLAGS)
 
 release:
-	$(BUILD_ENV) $(CARGO) build --release
+	RUSTFLAGS="$(RUSTFLAGS)" $(BUILD_ENV) $(CARGO) build --release $(CARGOFLAGS)
 
 test:
-	$(BUILD_ENV) $(CARGO) test
+	RUSTFLAGS="$(RUSTFLAGS)" $(BUILD_ENV) $(CARGO) test $(CARGOFLAGS)
 
 clean:
 	$(CARGO) clean
 
 install: release
-	install -d $(DESTDIR)$(BINDIR)
+	install -d $(DESTDIR)$(SBINDIR)
 	install -d $(DESTDIR)$(CONFDIR)
-	install -m 0755 target/release/rIdentD $(DESTDIR)$(BINDIR)/ridentd
-	install -m 0755 target/release/ridentd-natd $(DESTDIR)$(BINDIR)/ridentd-natd
+	install -m 0755 target/release/rIdentD $(DESTDIR)$(SBINDIR)/ridentd
+	install -m 0755 target/release/ridentd-natd $(DESTDIR)$(SBINDIR)/ridentd-natd
 
 uninstall:
-	rm -f $(DESTDIR)$(BINDIR)/ridentd $(DESTDIR)$(BINDIR)/ridentd-natd
+	rm -f $(DESTDIR)$(SBINDIR)/ridentd $(DESTDIR)$(SBINDIR)/ridentd-natd

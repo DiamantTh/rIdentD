@@ -1,0 +1,258 @@
+#!/bin/sh
+set -e
+
+quiet=no
+no_create=no
+disable_option_checking=no
+srcdir=.
+cache_file=
+
+prefix=/usr/local
+exec_prefix=
+bindir=
+sbindir=
+libexecdir=
+sysconfdir=
+sharedstatedir=
+localstatedir=
+runstatedir=
+libdir=
+includedir=
+oldincludedir=
+datarootdir=
+datadir=
+infodir=
+localedir=
+mandir=
+docdir=
+htmldir=
+dvidir=
+pdfdir=
+psdir=
+systemdsystemunitdir=
+confdir=
+
+cargo=${CARGO:-}
+rustflags=${RUSTFLAGS:-}
+cargoflags=${CARGOFLAGS:-}
+use_llvm=no
+
+log() {
+    if [ "$quiet" = "no" ]; then
+        printf '%s\n' "$*"
+    fi
+}
+
+die() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
+trim_slash() {
+    case "$1" in
+        /) printf '%s' "$1" ;;
+        */) printf '%s' "${1%/}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+show_version() {
+    if [ -f "$srcdir/Cargo.toml" ]; then
+        ver=$(sed -n 's/^version = "\(.*\)"/\1/p' "$srcdir/Cargo.toml" | head -n 1)
+        if [ -n "$ver" ]; then
+            printf 'rIdentD %s\n' "$ver"
+            return
+        fi
+    fi
+    printf 'rIdentD (version unknown)\n'
+}
+
+show_help() {
+    cat <<'EOF'
+Usage: ./configure [OPTION]... [VAR=VALUE]...
+
+Configuration:
+  -h, --help              display this help and exit
+      --help=short        display options specific to this package
+      --help=recursive    display the short help of all the included packages
+  -V, --version           display version information and exit
+  -q, --quiet, --silent   do not print `checking ...' messages
+  -n, --no-create         do not create output files
+      --srcdir=DIR        find the sources in DIR [configure dir or `..']
+      --cache-file=FILE   cache test results in FILE [disabled]
+  -C, --config-cache      alias for `--cache-file=config.cache'
+
+Installation directories:
+  --prefix=PREFIX         install architecture-independent files in PREFIX [/usr/local]
+  --exec-prefix=EPREFIX   install architecture-dependent files in EPREFIX [PREFIX]
+  --bindir=DIR            user executables [EPREFIX/bin]
+  --sbindir=DIR           system admin executables [EPREFIX/sbin]
+  --sysconfdir=DIR        read-only single-machine data [PREFIX/etc]
+  --with-confdir=DIR      identd config directory [SYSCONFDIR/rIdentD]
+
+Rust/Cargo:
+  --with-cargo=PATH       path to cargo binary
+  --with-rustflags=FLAGS  extra RUSTFLAGS
+  --with-cargoflags=ARGS  extra cargo flags
+  --enable-llvm           prefer clang/lld linker (-Clinker=clang -Clink-arg=-fuse-ld=lld)
+  --disable-llvm          do not force clang/lld
+
+Any VAR=VALUE is written to config.mk if it matches known vars (CARGO, RUSTFLAGS, CARGOFLAGS).
+EOF
+}
+
+process_var() {
+    case "$1" in
+        CARGO=*) cargo=${1#CARGO=} ;;
+        RUSTFLAGS=*) rustflags=${1#RUSTFLAGS=} ;;
+        CARGOFLAGS=*) cargoflags=${1#CARGOFLAGS=} ;;
+        *)
+            if [ "$disable_option_checking" = "yes" ]; then
+                return 0
+            fi
+            die "unknown variable assignment: $1"
+            ;;
+    esac
+}
+
+while [ $# -gt 0 ]; do
+    opt=$1
+    case "$opt" in
+        -h|--help|--help=short|--help=recursive)
+            show_help
+            exit 0
+            ;;
+        -V|--version)
+            show_version
+            exit 0
+            ;;
+        -q|--quiet|--silent)
+            quiet=yes
+            ;;
+        -n|--no-create)
+            no_create=yes
+            ;;
+        -C|--config-cache)
+            cache_file=config.cache
+            ;;
+        --cache-file=*)
+            cache_file=${opt#*=}
+            ;;
+        --srcdir=*)
+            srcdir=${opt#*=}
+            ;;
+        --disable-option-checking)
+            disable_option_checking=yes
+            ;;
+        --prefix=*)
+            prefix=${opt#*=}
+            ;;
+        --exec-prefix=*)
+            exec_prefix=${opt#*=}
+            ;;
+        --bindir=*)
+            bindir=${opt#*=}
+            ;;
+        --sbindir=*)
+            sbindir=${opt#*=}
+            ;;
+        --sysconfdir=*)
+            sysconfdir=${opt#*=}
+            ;;
+        --with-confdir=*)
+            confdir=${opt#*=}
+            ;;
+        --with-cargo=*)
+            cargo=${opt#*=}
+            ;;
+        --with-rustflags=*)
+            rustflags=${opt#*=}
+            ;;
+        --with-cargoflags=*)
+            cargoflags=${opt#*=}
+            ;;
+        --enable-llvm)
+            use_llvm=yes
+            ;;
+        --disable-llvm)
+            use_llvm=no
+            ;;
+        --*=*)
+            if [ "$disable_option_checking" = "yes" ]; then
+                :
+            else
+                die "unknown option: $opt"
+            fi
+            ;;
+        -*)
+            die "unknown option: $opt"
+            ;;
+        *=*)
+            process_var "$opt"
+            ;;
+        *)
+            die "unknown argument: $opt"
+            ;;
+    esac
+    shift
+done
+
+if [ -z "$exec_prefix" ]; then
+    exec_prefix=$prefix
+fi
+if [ -z "$bindir" ]; then
+    bindir=$exec_prefix/bin
+fi
+if [ -z "$sbindir" ]; then
+    sbindir=$exec_prefix/sbin
+fi
+if [ -z "$sysconfdir" ]; then
+    sysconfdir=$prefix/etc
+fi
+if [ -z "$confdir" ]; then
+    confdir=$sysconfdir/rIdentD
+fi
+if [ -z "$cargo" ]; then
+    cargo=cargo
+fi
+
+prefix=$(trim_slash "$prefix")
+exec_prefix=$(trim_slash "$exec_prefix")
+bindir=$(trim_slash "$bindir")
+sbindir=$(trim_slash "$sbindir")
+sysconfdir=$(trim_slash "$sysconfdir")
+confdir=$(trim_slash "$confdir")
+
+if [ "$use_llvm" = "yes" ]; then
+    if [ -n "$rustflags" ]; then
+        rustflags="$rustflags -Clinker=clang -Clink-arg=-fuse-ld=lld"
+    else
+        rustflags="-Clinker=clang -Clink-arg=-fuse-ld=lld"
+    fi
+fi
+
+if [ "$no_create" = "no" ]; then
+    log "creating config.mk"
+    cat > config.mk <<EOF
+PREFIX = $prefix
+EXEC_PREFIX = $exec_prefix
+BINDIR = $bindir
+SBINDIR = $sbindir
+SYSCONFDIR = $sysconfdir
+CONFDIR = $confdir
+CARGO = $cargo
+CARGOFLAGS = $cargoflags
+RUSTFLAGS = $rustflags
+EOF
+else
+    log "skipping config.mk creation (no-create set)"
+fi
+
+log "prefix=$prefix"
+log "exec_prefix=$exec_prefix"
+log "bindir=$bindir"
+log "sbindir=$sbindir"
+log "sysconfdir=$sysconfdir"
+log "confdir=$confdir"
+log "cargo=$cargo"
+log "llvm=$use_llvm"

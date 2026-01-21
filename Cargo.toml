@@ -9,3 +9,5 @@ name = "ridentd"
 
 [dependencies]
 libc = "0.2"
+mio = { version = "0.8", default-features = false, features = ["os-poll", "net"] }
+num_cpus = "1"

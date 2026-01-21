@@ -150,14 +150,24 @@ pub fn home_dir_from_uid(uid: u32) -> Option<PathBuf> {
 
 #[cfg(unix)]
 pub fn read_user_config(uid: u32, home: &Path) -> io::Result<Option<String>> {
-    let xdg = home.join(".config").join("oidentd.conf");
-    if let Some(content) = read_if_owned(uid, &xdg)? {
-        return Ok(Some(content));
-    }
+    // Preferred new names first, then legacy fallbacks for compatibility.
+    let candidates = [
+        home.join(".config").join("ridentd.conf"),
+        home.join(".config").join("oidentd.conf"),
+        home.join(".ridentd.conf"),
+        home.join(".rIdentD.conf"),
+        home.join(".rIdentD.conf.d"),
+        home.join(".oidentd.conf"),
+    ];
 
-    let legacy = home.join(".oidentd.conf");
-    if let Some(content) = read_if_owned(uid, &legacy)? {
-        return Ok(Some(content));
+    for path in candidates {
+        if path.is_dir() {
+            if let Some(content) = read_dir_if_owned(uid, &path)? {
+                return Ok(Some(content));
+            }
+        } else if let Some(content) = read_if_owned(uid, &path)? {
+            return Ok(Some(content));
+        }
     }
 
     Ok(None)
@@ -178,6 +188,51 @@ fn read_if_owned(uid: u32, path: &Path) -> io::Result<Option<String>> {
     }
 
     let content = fs::read_to_string(path)?;
+    Ok(Some(content))
+}
+
+#[cfg(unix)]
+fn read_dir_if_owned(uid: u32, dir: &Path) -> io::Result<Option<String>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = match fs::metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    if !metadata.is_dir() || metadata.uid() != uid {
+        return Ok(None);
+    }
+
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("conf") {
+            continue;
+        }
+        let meta = entry.metadata()?;
+        if !meta.is_file() || meta.uid() != uid {
+            continue;
+        }
+        entries.push(path);
+    }
+
+    if entries.is_empty() {
+        return Ok(None);
+    }
+
+    entries.sort();
+    let mut content = String::new();
+    for path in entries {
+        let file_content = fs::read_to_string(path)?;
+        content.push_str(&file_content);
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+    }
+
     Ok(Some(content))
 }
 
